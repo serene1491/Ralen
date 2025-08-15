@@ -107,7 +107,7 @@ public class Installer
         if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
         {
             var exeName = Path.GetFileName(exePath);
-            var nameWithoutExt = Path.GetFileNameWithoutExtension(exeName);
+            var nameWithoutExt = Path.GetFileNameWithoutExtension(exeName).ToLowerInvariant(); // force lowercase
             var linkPath = Path.Combine(targetBin, nameWithoutExt);
 
             try
