@@ -2,7 +2,8 @@ using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
-/* ---------- Installer (instalar linguagens + packages) ---------- */
+using System.Reflection;
+
 public class Installer
 {
     readonly Config cfg;
@@ -17,10 +18,279 @@ public class Installer
 
     public void ConfigurePathNow()
     {
-        // configure PATH to include install root (user must have started interactively to accept)
-        var addDir = Path.Combine(cfg.InstallDir); // include whole install dir so bin subfolders can be referenced
-        AddToUserPath(addDir);
-        Console.WriteLine($"Updated user PATH to include: {addDir}");
+        var addDir = Path.GetFullPath(cfg.InstallDir);
+        Console.WriteLine($"Adding install root to user PATH and creating shim(s) as needed (install root = {addDir})...");
+        TryEnsureUserBinAndCreateShim(addDir);
+    }
+
+    void TryEnsureUserBinAndCreateShim(string installRoot)
+    {
+        var exePath = GetCurrentExecutablePath();
+        if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath))
+        {
+            Console.WriteLine("Warning: could not find current executable path to create a shim.");
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            EnsureWindowsUserBinAndShim(exePath);
+        }
+        else
+        {
+            EnsureUnixUserBinAndShim(exePath);
+        }
+    }
+
+    static string GetCurrentExecutablePath()
+    {
+        // tenta diferentes formas de obter o caminho para o executável atual
+        try
+        {
+            var asm = Assembly.GetEntryAssembly();
+            var loc = asm?.Location;
+            if (!string.IsNullOrEmpty(loc)) return loc;
+
+            var env0 = Environment.GetCommandLineArgs().FirstOrDefault();
+            if (!string.IsNullOrEmpty(env0))
+            {
+                var full = Path.GetFullPath(env0);
+                if (File.Exists(full)) return full;
+            }
+
+            try
+            {
+                var mod = Process.GetCurrentProcess().MainModule?.FileName;
+                if (!string.IsNullOrEmpty(mod)) return mod;
+            }
+            catch {}
+
+            return null;
+        }
+        catch { return null; }
+    }
+
+    void EnsureUnixUserBinAndShim(string exePath)
+    {
+        var envPath = Environment.GetEnvironmentVariable("PATH") ?? "";
+        var pathParts = envPath.Split(':').Where(p => !string.IsNullOrWhiteSpace(p)).ToArray();
+
+        string candidate = null;
+        foreach (var p in pathParts)
+        {
+            var homef = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (p.StartsWith(homef) && Directory.Exists(p) && IsDirWritable(p))
+            {
+                candidate = p;
+                break;
+            }
+        }
+
+        // se não encontrou, preferir ~/.local/bin ou ~/bin
+        var homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var localBin = Path.Combine(homeDir, ".local", "bin");
+        var simpleBin = Path.Combine(homeDir, "bin");
+        string targetBin;
+
+        if (candidate != null) targetBin = candidate;
+        else if (Directory.Exists(localBin) || TryCreateDir(localBin)) targetBin = localBin;
+        else if (Directory.Exists(simpleBin) || TryCreateDir(simpleBin)) targetBin = simpleBin;
+        else
+        {
+            // fallback: usar ~/.ralen (já adicionada ao profile pelos métodos antigos)
+            var ralenBin = Path.Combine(homeDir, ".ralen");
+            TryCreateDir(ralenBin);
+            targetBin = ralenBin;
+        }
+
+        Console.WriteLine($"Using user bin directory: {targetBin}");
+
+        if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
+        {
+            var exeName = Path.GetFileName(exePath);
+            var nameWithoutExt = Path.GetFileNameWithoutExtension(exeName);
+            var linkPath = Path.Combine(targetBin, nameWithoutExt);
+
+            try
+            {
+                if (CreateSymlinkIfPossible(exePath, linkPath))
+                    Console.WriteLine($"Created symlink: {linkPath} -> {exePath}");
+                else
+                {
+                    CreateUnixWrapperScript(exePath, linkPath);
+                    Console.WriteLine($"Created wrapper script: {linkPath} -> executes {exePath}");
+                }
+
+                try { Process.Start(new ProcessStartInfo { FileName = "chmod", Arguments = $"+x \"{linkPath}\"", UseShellExecute = false })?.WaitForExit(); } catch { }
+            }
+            catch (Exception ex){
+                Console.WriteLine($"Warning creating shim: {ex.Message}");
+            }
+        }
+        else
+        {
+            Console.WriteLine("Executable not found; shim won't be created. Make sure the binary is placed in the install dir or run manual symlink.");
+        }
+
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var profile = Path.Combine(home, ".profile");
+        var bashrc = Path.Combine(home, ".bashrc");
+        var exportLine = $"export PATH=\"{targetBin}:$PATH\"";
+
+        void AddIfMissing(string file)
+        {
+            try
+            {
+                if (!File.Exists(file)) File.WriteAllText(file, "# created by ralen\n");
+                var content = File.ReadAllText(file);
+                if (!content.Contains(exportLine))
+                {
+                    File.AppendAllText(file, "\n# ralen\n" + exportLine + "\n");
+                }
+            }
+            catch { }
+        }
+
+        AddIfMissing(profile);
+        AddIfMissing(bashrc);
+
+        Console.WriteLine();
+        Console.WriteLine("If the command is still not found in this session, run one of:");
+        Console.WriteLine("  source ~/.profile");
+        Console.WriteLine("or re-open your terminal. The shim was placed in: " + targetBin);
+    }
+
+    bool IsDirWritable(string dir)
+    {
+        try
+        {
+            var test = Path.Combine(dir, ".ralen_write_test_" + Guid.NewGuid().ToString("N"));
+            File.WriteAllText(test, "x");
+            File.Delete(test);
+            return true;
+        }
+        catch { return false; }
+    }
+
+    bool TryCreateDir(string dir)
+    {
+        try { Directory.CreateDirectory(dir); return true; } catch { return false; }
+    }
+
+    bool CreateSymlinkIfPossible(string target, string linkPath)
+    {
+        try
+        {
+            if (File.Exists(linkPath) || Directory.Exists(linkPath))
+            {
+                File.Delete(linkPath);
+            }
+
+            // On Unix create symbolic link
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                var result = MonoUnixSymlink(target, linkPath);
+                return result;
+            }
+            else
+            {
+                // On Windows, try to create symlink (may require privilege)
+                return false;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    bool MonoUnixSymlink(string target, string linkPath)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "ln",
+                Arguments = $"-sf \"{target}\" \"{linkPath}\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            var p = Process.Start(psi);
+            p.WaitForExit();
+            return p.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    void CreateUnixWrapperScript(string exePath, string linkPath)
+    {
+        var script = $"#!/usr/bin/env sh\n\"{exePath}\" \"$@\"\n";
+        File.WriteAllText(linkPath, script);
+    }
+
+    void EnsureWindowsUserBinAndShim(string exePath)
+    {
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var winBin = Path.Combine(userProfile, "bin");
+        TryCreateDir(winBin);
+
+        string cmdName = "ralen";
+        if (!string.IsNullOrEmpty(exePath))
+        {
+            var exeName = Path.GetFileName(exePath);
+            cmdName = Path.GetFileNameWithoutExtension(exeName);
+        }
+
+        var cmdShimPath = Path.Combine(winBin, cmdName + ".cmd");
+
+        try
+        {
+            if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
+            {
+                var content = $"@echo off\r\n\"{exePath}\" %*\r\n";
+                File.WriteAllText(cmdShimPath, content);
+            }
+            else
+                Console.WriteLine("Executable not found; creating empty shim not possible.");
+
+            var cur = Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.User) ?? "";
+            var parts = cur.Split(Path.PathSeparator).Select(p => p.Trim()).Where(p => !string.IsNullOrEmpty(p)).ToList();
+            if (!parts.Any(p => string.Equals(Path.GetFullPath(p), Path.GetFullPath(winBin), StringComparison.OrdinalIgnoreCase)))
+            {
+                parts.Insert(0, winBin);
+                var newPath = string.Join(Path.PathSeparator.ToString(), parts);
+                Environment.SetEnvironmentVariable("PATH", newPath, EnvironmentVariableTarget.User);
+
+                TryBroadcastEnvironmentChanged();
+            }
+
+            Console.WriteLine($"Created Windows shim: {cmdShimPath}");
+            Console.WriteLine("If the command is not available immediately, you may need to restart your shell or sign out/in.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Failed creating Windows shim: " + ex.Message);
+        }
+    }
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+
+    const int HWND_BROADCAST = 0xffff;
+    const uint WM_SETTINGCHANGE = 0x001A;
+    const uint SMTO_ABORTIFHUNG = 0x0002;
+
+    void TryBroadcastEnvironmentChanged()
+    {
+        try
+        {
+            UIntPtr result;
+            SendMessageTimeout((IntPtr)HWND_BROADCAST, WM_SETTINGCHANGE, UIntPtr.Zero, "Environment", SMTO_ABORTIFHUNG, 5000, out result);
+        }
+        catch {}
     }
 
     public async Task InstallLanguage(string repoOrName, string releaseOrUrl)
@@ -28,9 +298,7 @@ public class Installer
         Directory.CreateDirectory(cfg.InstallDir);
         string downloadUrl;
         if (Uri.IsWellFormedUriString(releaseOrUrl, UriKind.Absolute))
-        {
             downloadUrl = releaseOrUrl;
-        }
         else
         {
             string owner, repo;
