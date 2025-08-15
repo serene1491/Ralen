@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using System.Reflection;
+using System.Text.Json;
 
 public class Installer
 {
@@ -16,6 +17,8 @@ public class Installer
         Directory.CreateDirectory(Path.Combine(cfg.InstallDir, "modules"));
     }
 
+    #region Path
+
     public void ConfigurePathNow()
     {
         var addDir = Path.GetFullPath(cfg.InstallDir);
@@ -27,18 +30,12 @@ public class Installer
     {
         var exePath = GetCurrentExecutablePath();
         if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath))
-        {
             Console.WriteLine("Warning: could not find current executable path to create a shim.");
-        }
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
             EnsureWindowsUserBinAndShim(exePath);
-        }
         else
-        {
             EnsureUnixUserBinAndShim(exePath);
-        }
     }
 
     static string GetCurrentExecutablePath()
@@ -293,6 +290,130 @@ public class Installer
         catch {}
     }
 
+    #endregion Path
+
+    public async Task<(bool success, string tagName, string suggestedUrl, string message)> TryGetLatestReleaseSuggestion(
+    string owner, string repo, string assetBaseName = null)
+    {
+        try
+        {
+            assetBaseName ??= repo;
+            var apiUrl = $"https://api.github.com/repos/{owner}/{repo}/releases/latest";
+
+            using var req = new HttpRequestMessage(HttpMethod.Get, apiUrl);
+            req.Headers.UserAgent.ParseAdd("ralen-installer/1.0");
+
+            var githubToken = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
+            if (!string.IsNullOrEmpty(githubToken))
+                req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("token", githubToken);
+
+            using var resp = await http.SendAsync(req);
+            if (!resp.IsSuccessStatusCode)
+            {
+                var fallbackMsg = $"Could not query GitHub API ({(int)resp.StatusCode}). Try opening: https://github.com/{owner}/{repo}/releases";
+                return (false, null, $"https://github.com/{owner}/{repo}/releases", fallbackMsg);
+            }
+
+            var json = await resp.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            var tagName = root.GetProperty("tag_name").GetString() ?? root.GetProperty("name").GetString() ?? "latest";
+            string releaseHtmlUrl = root.TryGetProperty("html_url", out var htmlEl) ? htmlEl.GetString() : $"https://github.com/{owner}/{repo}/releases/tag/{tagName}";
+
+            if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array && assets.GetArrayLength() > 0)
+            {
+                var candidates = BuildAssetNameCandidates(repo, tagName, assetBaseName).Select(s => s.ToLowerInvariant()).ToArray();
+                foreach (var assetEl in assets.EnumerateArray())
+                {
+                    if (!assetEl.TryGetProperty("name", out var nameEl)) continue;
+                    var name = nameEl.GetString() ?? "";
+                    var nameLower = name.ToLowerInvariant();
+
+                    if (candidates.Any(c => nameLower == c || nameLower.Contains(c) || c.Contains(nameLower) || nameLower.Contains(assetBaseName.ToLowerInvariant())))
+                    {
+                        if (assetEl.TryGetProperty("browser_download_url", out var urlEl))
+                        {
+                            var url = urlEl.GetString();
+                            var message = $"Sugestão: última release {tagName}. Pode tentar este asset: {url}";
+                            return (true, tagName, url, message);
+                        }
+                    }
+                }
+
+                foreach (var assetEl in assets.EnumerateArray())
+                {
+                    if (assetEl.TryGetProperty("browser_download_url", out var urlEl))
+                    {
+                        var url = urlEl.GetString();
+                        if (!string.IsNullOrEmpty(url))
+                        {
+                            var message = $"Última release {tagName} encontrada, nenhum asset casou exatamente com sua plataforma — veja o primeiro asset: {url}";
+                            return (true, tagName, url, message);
+                        }
+                    }
+                }
+            }
+
+            var archiveUrl = $"https://github.com/{owner}/{repo}/archive/refs/tags/{tagName}.zip";
+            var fallback = releaseHtmlUrl ?? $"https://github.com/{owner}/{repo}/releases";
+            var fallbackMessage = $"Última release: {tagName}. Verifique a release: {fallback} ou tente baixar o archive: {archiveUrl}";
+            return (true, tagName, archiveUrl, fallbackMessage);
+        }
+        catch (Exception ex)
+        {
+            var msg = $"Não foi possível obter a última release ({ex.Message}). Verifique: https://github.com/{owner}/{repo}/releases";
+            return (false, null, $"https://github.com/{owner}/{repo}/releases", msg);
+        }
+    }
+    
+    IEnumerable<string> BuildAssetNameCandidates(string repo, string tag, string? assetBaseName = null)
+    {
+        assetBaseName ??= repo;
+
+        var exts = new[] { "", ".tar.gz", ".tgz", ".zip", ".exe" };
+        var platforms = GetPlatformCandidates();
+        var archs = GetArchCandidates();
+
+        yield return assetBaseName;
+        foreach (var ext in exts) yield return assetBaseName + ext;
+
+        foreach (var p in platforms)
+        {
+            foreach (var a in archs)
+            {
+                yield return $"{assetBaseName}-{p}-{a}";
+                yield return $"{assetBaseName}-{p}{a}";
+                yield return $"{assetBaseName}-{p}-{a}.tar.gz";
+                yield return $"{assetBaseName}-{p}-{a}.zip";
+                yield return $"{repo}-{tag}-{p}-{a}.zip";
+            }
+        }
+
+        yield return $"{repo}-{tag}.zip";
+        yield return $"{repo}.zip";
+    }
+
+    string[] GetPlatformCandidates()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return new[] { "windows" };
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) return new[] { "linux" };
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) return new[] { "macos", "darwin", "osx" };
+        return new[] { "linux", "windows", "macos" };
+    }
+
+    string[] GetArchCandidates()
+    {
+        switch (RuntimeInformation.ProcessArchitecture)
+        {
+            case Architecture.X64: return new[] { "x64", "amd64", "x86_64" };
+            case Architecture.X86: return new[] { "x86", "i386" };
+            case Architecture.Arm64: return new[] { "arm64", "aarch64" };
+            case Architecture.Arm: return new[] { "arm", "armv7" };
+            default: return new[] { "x64", "amd64" };
+        }
+    }
+
     public async Task InstallLanguage(string repoOrName, string releaseOrUrl)
     {
         Directory.CreateDirectory(cfg.InstallDir);
@@ -314,12 +435,14 @@ public class Installer
             }
 
             var platformAssetName = GuessAssetName(repo, releaseOrUrl);
-            var candidates = new List<string>();
-            candidates.Add($"https://github.com/{owner}/{repo}/releases/download/{releaseOrUrl}/{platformAssetName}");
-            candidates.Add($"https://github.com/{owner}/{repo}/releases/download/{releaseOrUrl}/{repo}-{releaseOrUrl}.zip");
-            candidates.Add($"https://github.com/{owner}/{repo}/releases/download/{releaseOrUrl}/{repo}-{releaseOrUrl}.tar.gz");
-            candidates.Add($"https://github.com/{owner}/{repo}/releases/download/{releaseOrUrl}/{repo}.zip");
-            candidates.Add($"https://github.com/{owner}/{repo}/archive/refs/tags/{releaseOrUrl}.zip");
+            var candidates = new List<string>
+            {
+                $"https://github.com/{owner}/{repo}/releases/download/{releaseOrUrl}/{platformAssetName}",
+                $"https://github.com/{owner}/{repo}/releases/download/{releaseOrUrl}/{repo}-{releaseOrUrl}.zip",
+                $"https://github.com/{owner}/{repo}/releases/download/{releaseOrUrl}/{repo}-{releaseOrUrl}.tar.gz",
+                $"https://github.com/{owner}/{repo}/releases/download/{releaseOrUrl}/{repo}.zip",
+                $"https://github.com/{owner}/{repo}/archive/refs/tags/{releaseOrUrl}.zip"
+            };
 
             string found = null;
             foreach (var c in candidates)
@@ -331,7 +454,13 @@ public class Installer
             }
             if (found == null)
             {
-                Console.Error.WriteLine("The asset could not be located automatically. You can pass a direct URL to the release file (zip/tar.gz).");
+                Console.Error.WriteLine("The asset was not found automatically.");
+
+                var (ok, tag, suggestionUrl, message) = await TryGetLatestReleaseSuggestion(owner, repo, repo /* assetBaseName opcional */);
+                if (ok)
+                    Console.Error.WriteLine("Suggestion: " + message);
+                else
+                    Console.Error.WriteLine($"Check manually: {suggestionUrl}");
                 return;
             }
             downloadUrl = found;
@@ -348,10 +477,8 @@ public class Installer
                 Console.Error.WriteLine($"Download failed: {resp.StatusCode}");
                 return;
             }
-            using (var fs = new FileStream(downloaded, FileMode.Create, FileAccess.Write, FileShare.None))
-            {
-                await resp.Content.CopyToAsync(fs);
-            }
+            using var fs = new FileStream(downloaded, FileMode.Create, FileAccess.Write, FileShare.None);
+            await resp.Content.CopyToAsync(fs);
         }
 
         var lang = repoOrName.Contains('/') ? repoOrName.Split('/').Last() : repoOrName;
