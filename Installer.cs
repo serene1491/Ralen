@@ -367,7 +367,7 @@ public class Installer
         }
     }
     
-    IEnumerable<string> BuildAssetNameCandidates(string repo, string tag, string? assetBaseName = null)
+    IEnumerable<string> BuildAssetNameCandidates(string repo, string tag, string assetBaseName = null)
     {
         assetBaseName ??= repo;
 

@@ -173,7 +173,7 @@ class InteractiveRalen
         Console.WriteLine(@"
 Commands (interactive mode):
     help
-    install lang <owner/repo | LangName> <release | url>
+    install lang <langName> <release>
     make console [--name <name>] [--lang <Language>] [--version <version>]
     run [<path_to_directory_or_file>]
     add package <url_to_file>       # downloads the file to <installRoot>/modules/ if it doesn't exist
