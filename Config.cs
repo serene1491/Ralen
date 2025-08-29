@@ -1,5 +1,6 @@
+using System.Text.Json;
+namespace Ralen;
 
-/* ---------- Configuration ---------- */
 public class Config
 {
     public string InstallDir { get; set; } = DefaultInstallDir();
@@ -21,11 +22,11 @@ public class Config
             {
                 var cfg = new Config();
                 Directory.CreateDirectory(Path.GetDirectoryName(cfgPath)!);
-                File.WriteAllText(cfgPath, System.Text.Json.JsonSerializer.Serialize(cfg, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+                File.WriteAllText(cfgPath, JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true }));
                 return cfg;
             }
             var raw = File.ReadAllText(cfgPath);
-            var obj = System.Text.Json.JsonSerializer.Deserialize<Config>(raw) ?? new Config();
+            var obj = JsonSerializer.Deserialize<Config>(raw) ?? new Config();
             return obj;
         }
         catch
@@ -38,6 +39,6 @@ public class Config
     {
         var cfgPath = Path.Combine(DefaultInstallDir(), "config.json");
         Directory.CreateDirectory(Path.GetDirectoryName(cfgPath)!);
-        File.WriteAllText(cfgPath, System.Text.Json.JsonSerializer.Serialize(this, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        File.WriteAllText(cfgPath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
     }
 }
