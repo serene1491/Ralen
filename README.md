@@ -2,13 +2,19 @@ Ralen is an easy-to-use and easy-to-install environment. To test it for yourself
 
 # Linux
 ```
-mkdir -p ~/.ralen && curl -L https://github.com/serene1491/Ralen/releases/latest/download/ralenLinux64 -o ~/.ralen/Ralen && chmod +x ~/.ralen/Ralen && ~/.ralen/Ralen configure-path
-
+mkdir -p ~/.ralen
+curl -L -o ~/.ralen/Ralen https://github.com/serene1491/Ralen/releases/latest/download/Ralen
+chmod +x ~/.ralen/Ralen
+~/.ralen/Ralen configure-path
+~/.ralen/Ralen --version
 ```
 
 # Windows (PowerShell)
 ```
-if (-not (Test-Path "$env:USERPROFILE\.ralen")) { New-Item -ItemType Directory -Path "$env:USERPROFILE\.ralen" | Out-Null }; Invoke-WebRequest https://github.com/serene1491/Ralen/releases/latest/download/ralenWin64.exe -OutFile "$env:USERPROFILE\.ralen\Ralen.exe"; & "$env:USERPROFILE\.ralen\Ralen.exe" configure-path
+if (-not (Test-Path "$env:USERPROFILE\.ralen")) { New-Item -ItemType Directory -Path "$env:USERPROFILE\.ralen" | Out-Null }
+Invoke-WebRequest https://github.com/serene1491/Ralen/releases/latest/download/Ralen.exe -OutFile "$env:USERPROFILE\.ralen\Ralen.exe"
+& "$env:USERPROFILE\.ralen\Ralen.exe" configure-path
+& "$env:USERPROFILE\.ralen\Ralen.exe" --version
 ```
 
 
